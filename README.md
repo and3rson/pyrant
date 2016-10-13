@@ -28,6 +28,13 @@ None
     # Dump rant data, useful for checking out the available attributes
     print json.dumps(rant.serialize(), indent=4)
 
+# Roadmap
+
+- Authentication
+- Test coverage
+- Profile
+- Creating/editing rants
+- Notifications
 
 # License
 
