@@ -8,7 +8,7 @@ None
 
 # Usage example
 
-See [https://github.com/and3rson/pyrant/blob/master/test.py](tests) for examples.
+See [tests](https://github.com/and3rson/pyrant/blob/master/test.py) for examples.
 
 # Roadmap
 
