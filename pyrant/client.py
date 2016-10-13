@@ -2,27 +2,48 @@ from __future__ import unicode_literals
 import urllib
 import urllib2
 import json
+import requests
+from weakref import proxy
 
 
 class Remote(object):
-    URL = 'https://www.devrant.io/api/devrant'
-    APP_ID = 3
+    URL = 'https://www.devrant.io/api'
 
     def __init__(self):
-        pass
+        # self.opener = urllib2.build_opener(urllib2.HTTPHandler)
+        self.extra = {}
 
-    @classmethod
-    def _request(cls, method, **kwargs):
-        kwargs['app'] = Remote.APP_ID
-        url = Remote.URL + '/' + method + '?' + urllib.urlencode(kwargs)
-        response = urllib2.urlopen(
-            url
-        )
-        return response.read()
+    def add_extra(self, key, value):
+        self.extra[key] = value
 
-    @classmethod
-    def _json_request(cls, url, **kwargs):
-        return json.loads(cls._request(url, **kwargs))
+    def _request(self, endpoint, method, **kwargs):
+        kwargs.update(self.extra)
+        # if method in ('POST', 'PUT', 'PATCH'):
+        #     url = Remote.URL + '/' + endpoint
+        #     request = urllib2.Request(url, data=json.dumps(kwargs))
+        # else:
+        #     url = Remote.URL + '/' + endpoint + '?' + urllib.urlencode(kwargs)
+        #     request = urllib2.Request(url)
+
+        # # request.add_header('Content-type', 'application/json')
+        # request.get_method = lambda: method
+
+        # response = self.opener.open(request)
+        # return response.read()
+
+        opener = getattr(requests, method.lower())
+
+        if method in ('POST', 'PUT', 'PATCH'):
+            url = Remote.URL + '/' + endpoint
+            response = opener(url, data=kwargs)
+        else:
+            url = Remote.URL + '/' + endpoint + '?' + urllib.urlencode(kwargs)
+            response = opener(url)
+
+        return response.content
+
+    def _json_request(self, endpoint, method='GET', **kwargs):
+        return json.loads(self._request(endpoint, method, **kwargs))
 
 
 class Serializable(object):
@@ -41,16 +62,44 @@ class Serializable(object):
 class Client(Remote):
     def __init__(self):
         super(Client, self).__init__()
+        self.add_extra('app', 3)
+        self._is_authorized = False
 
     def get_news(self):
-        return News(self._request('rants')['news'])
+        return News(self._request('devrant/rants')['news'])
 
     def get_rants(self, sort=None, skip=0):
-        return [Rant(data) for data in self._json_request(
-            'rants',
+        return [Rant(self, data) for data in self._json_request(
+            'devrant/rants',
             sort=sort,
             skip=skip
         )['rants']]
+
+    def get_rant(self, id):
+        return Rant.get(self, id)
+
+    def log_in(self, username, password, raise_exception=True):
+        response = self._json_request(
+            'users/auth-token',
+            'POST',
+            username=username,
+            password=password
+        )
+        if response['success']:
+            data = response['auth_token']
+            self.add_extra('token_key', data['key'])
+            self.add_extra('token_id', data['id'])
+            self.add_extra('user_id', data['user_id'])
+            self._is_authorized = True
+            return True
+        else:
+            if raise_exception:
+                raise Exception('Auth failed, reason: {}'.format(response['error']))
+            return False
+
+    @property
+    def is_authorized(self):
+        return self._is_authorized
 
 
 class News(Serializable):
@@ -102,7 +151,7 @@ class Tag(Serializable):
         return u'<Tag "{}">'.format(self.value)
 
 
-class Rant(Remote, Serializable):
+class Rant(Serializable):
     PROPS = (
         'attached_image', 'created_time', 'edited', 'id',
         'num_comments', 'num_upvotes', 'num_downvotes',
@@ -113,8 +162,9 @@ class Rant(Remote, Serializable):
     )
     SERIALIZED_PROPS = PROPS + ('comments',)
 
-    def __init__(self, data=None, comments=None, id_=None):
+    def __init__(self, client, data=None, comments=None, id_=None):
         super(Rant, self).__init__()
+        self.client = proxy(client)
 
         for key in self.PROPS:
             setattr(self, key, None)
@@ -137,7 +187,8 @@ class Rant(Remote, Serializable):
         for key in Rant.PROPS:
             if data:
                 setattr(self, key, data[key])
-        self.tags = [Tag(tag_data) for tag_data in self.tags]
+        if self.tags:
+            self.tags = [Tag(tag_data) for tag_data in self.tags]
         if self.attached_image:
             self.attached_image = Image(self.attached_image)
 
@@ -146,24 +197,22 @@ class Rant(Remote, Serializable):
             self._comments = [
                 Comment(comment_data) for comment_data in comments
             ]
-        else:
-            self._comments = None
 
     def update(self):
         if not self.id:
             raise Exception('Cannot update Rant with unset ID.')
-        result = Rant._load(self.id)
+        result = Rant._load(self.client, self.id)
         self._set_data(result['rant'])
         self._set_comments(result['comments'])
 
     @classmethod
-    def _load(cls, id):
-        return cls._json_request('rants/{}'.format(id))
+    def _load(cls, client, id):
+        return client._json_request('devrant/rants/{}'.format(id))
 
     @classmethod
-    def get(cls, id):
-        data = cls._load(id)
-        return Rant(data['rant'], data['comments'])
+    def get(cls, client, id):
+        data = cls._load(client, id)
+        return Rant(client, data['rant'], data['comments'])
 
     @property
     def comments(self):
@@ -174,8 +223,26 @@ class Rant(Remote, Serializable):
             ]
         return self._comments
 
+    def vote(self, up=True):
+        # TODO: Make this assert a decorator instead.
+        assert self.client.is_authorized, 'You must be authorized to perform this request.'
 
-class Comment(Remote, Serializable):
+        # TODO: And this.
+        if not self.id:
+            raise Exception('Cannot update Rant with unset ID.')
+
+        result = self.client._json_request(
+            'devrant/rants/{}/vote'.format(self.id),
+            'POST',
+            vote=1 if up else 0
+        )
+        if result['success']:
+            self._set_data(result['rant'])
+        else:
+            raise Exception('Failed to vote for rant, error was: {}'.format(result['error']))
+
+
+class Comment(Serializable):
     PROPS = (
         'id', 'rant_id', 'body',
         'num_upvotes', 'num_downvotes',
@@ -198,8 +265,3 @@ class Comment(Remote, Serializable):
             self.rant_id,
             self.user_username
         )
-
-    @classmethod
-    def get(cls, id):
-        data = cls._json_request('rants/{}'.format(id))
-        return Rant(data['rant'], data['comments'])
